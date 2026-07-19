@@ -1,0 +1,17 @@
+{
+  "name": "tiktok-live",
+  "version": "1.0.0",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3",
+    "tiktok-live-connector": "^3.0.0"
+  }
+}
