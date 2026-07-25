@@ -6,10 +6,12 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const { TikTokLiveConnection, ControlEvent, ControlAction } = require("tiktok-live-connector");
 
+require("dotenv").config();
+
 const app = express();
 const server = http.createServer(app);
 
-// CORS seguro (inclui localhost por padrão, além do que vier em ALLOWED_ORIGINS)
+// ✅ CORS seguro (inclui localhost por padrão, além do que vier em ALLOWED_ORIGINS)
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
     .split(",")
     .map(o => o.trim())
@@ -37,7 +39,7 @@ const io = new Server(server, {
     }
 });
 
-// Config
+// 🔧 Config
 // Sem fallback silencioso: se TIKTOK_USER não estiver configurado, o
 // servidor recusa a subir em vez de monitorar uma conta errada sem avisar.
 const username = process.env.TIKTOK_USER;
@@ -58,7 +60,7 @@ const HEARTBEAT_GRACE_PERIOD = 90000;
 const HEARTBEAT_MAX_DELAY = 120000;
 const ACTIVITY_WINDOW = 180000; // 3 min
 
-// Estado
+// 🔥 Estado
 let isLive = false;
 let connection = null;
 let retryTimer = null;
@@ -70,13 +72,13 @@ let lastCheck = null;
 let connectedAt = null;
 let lastLiveChange = 0;
 
-// Controle de atividade real (chat/like/gift/member).
+// 🧠 Controle de atividade real (chat/like/gift/member).
 // Começa em 0 (nunca houve atividade) — só passa a ter valor quando um
 // evento real chega. Isso evita que os primeiros minutos após conectar
 // sejam tratados como "atividade recente" apenas por a conexão ser nova.
 let lastActivity = 0;
 
-// Atualiza status
+// 📡 Atualiza status
 function setLive(status) {
     const now = Date.now();
 
@@ -93,7 +95,7 @@ function setLive(status) {
     io.emit("liveStatus", { user: username, online: isLive, lastCheck });
 }
 
-// Reset geral
+// 🧹 Reset geral
 function resetState() {
     clearTimeout(retryTimer);
     clearInterval(heartbeatTimer);
@@ -103,7 +105,7 @@ function resetState() {
     // chamado enquanto um retry já estava agendado
 }
 
-// Retry
+// 🔁 Retry
 function scheduleRetry(baseDelay) {
     if (retryScheduled) return;
 
@@ -120,7 +122,7 @@ function scheduleRetry(baseDelay) {
     }, delay);
 }
 
-// Cleanup
+// 🧹 Cleanup
 function cleanupConnection() {
     clearInterval(heartbeatTimer);
 
@@ -131,7 +133,7 @@ function cleanupConnection() {
     }
 }
 
-// Heartbeat
+// 💓 Heartbeat
 function startHeartbeat() {
     clearInterval(heartbeatTimer);
 
@@ -152,7 +154,17 @@ function startHeartbeat() {
         try {
             const roomInfo = await connection.fetchRoomInfo();
 
-            const stillLive = roomInfo?.status === 2 || hasRecentActivity;
+            // A API é a fonte de verdade quando responde com um status
+            // reconhecido. Atividade recente (chat/like/gift/member) só
+            // serve de apoio quando a API não retorna dado confiável —
+            // ela nunca deve sobrepor um "offline" que a própria API
+            // acabou de confirmar (isso causava até ~3 min de atraso
+            // marcando "AO VIVO" após o encerramento real da live).
+            const apiConfirmouOffline = roomInfo?.status !== undefined && roomInfo.status !== 2;
+
+            const stillLive = apiConfirmouOffline
+                ? false
+                : (roomInfo?.status === 2 || hasRecentActivity);
 
             if (stillLive) {
                 heartbeatFails = 0;
@@ -201,7 +213,7 @@ function startHeartbeat() {
     }, HEARTBEAT_INTERVAL);
 }
 
-// Conexão
+// 🔍 Conexão
 function connectToLive() {
     if (isConnecting || connection) {
         console.log("⚠️ Já conectando/conectado");
@@ -305,12 +317,12 @@ function connectToLive() {
     });
 }
 
-// Socket
+// 📡 Socket
 io.on("connection", (socket) => {
     socket.emit("liveStatus", { user: username, online: isLive, lastCheck });
 });
 
-// Health
+// 🌐 Health
 app.get("/health", (req, res) => {
     res.json({
         status: "ok",
@@ -324,14 +336,14 @@ app.get("/health", (req, res) => {
 
 app.use(express.static("public"));
 
-// Start
+// 🚀 Start
 server.listen(PORT, () => {
     console.log(`🚀 Rodando em http://localhost:${PORT}`);
     console.log(`Monitorando: @${username}`);
     connectToLive();
 });
 
-// Shutdown 
+// 🛑 Shutdown
 function shutdown() {
     console.log("Encerrando...");
     resetState();
