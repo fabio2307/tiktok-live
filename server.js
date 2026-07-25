@@ -102,7 +102,7 @@ function resetState() {
     retryTimer = null;
     heartbeatTimer = null;
     retryScheduled = false; // evita travar scheduleRetry() se resetState() for
-    // chamado enquanto um retry já estava agendado
+                            // chamado enquanto um retry já estava agendado
 }
 
 // 🔁 Retry
@@ -194,7 +194,7 @@ function startHeartbeat() {
         console.log({
             heartbeatFails,
             delay: Math.floor(delaySinceLastOk / 1000) + "s",
-            semAtividade: Math.floor(timeSinceActivity / 1000) + "s"
+            semAtividade: lastActivity > 0 ? Math.floor(timeSinceActivity / 1000) + "s" : "nunca"
         });
 
         if (
@@ -252,7 +252,7 @@ function connectToLive() {
         }
     }, 15000);
 
-    connection.once(ControlEvent.CONNECTED, (state) => {
+    connection.once(ControlEvent.CONNECTED, async (state) => {
         tentativaResolvida = true;
         clearTimeout(connectTimeout);
 
@@ -260,12 +260,31 @@ function connectToLive() {
         retryCount = 0;
         connectedAt = Date.now();
 
-        // lastActivity NÃO é setado aqui — conectar não é o mesmo que ter
-        // atividade real. Fica em 0 até o primeiro chat/like/gift/member
-        // chegar de verdade, evitando falso "benefício da dúvida" nos
-        // primeiros minutos após uma conexão que já estava offline.
-
         console.log(`✅ Conectado à sala ${state.roomId}`);
+
+        // O evento CONNECTED confirma apenas que o WebSocket abriu — não
+        // que a sala está de fato ao vivo agora. A biblioteca pode
+        // reconectar numa sala já encerrada (mesmo roomId de uma conexão
+        // anterior). Por isso, confirmamos via fetchRoomInfo() ANTES de
+        // marcar como ao vivo, em vez de esperar o primeiro heartbeat
+        // (60s depois) para descobrir que era um falso positivo.
+        try {
+            const roomInfo = await connection.fetchRoomInfo();
+            const realmenteAoVivo = roomInfo?.status === 2;
+
+            if (!realmenteAoVivo) {
+                console.log("⚠️ CONNECTED disparou mas a sala não está ao vivo (roomId reaproveitado/stale)");
+                setLive(false);
+                cleanupConnection();
+                scheduleRetry(RETRY_BASE);
+                return;
+            }
+        } catch (err) {
+            console.log("⚠️ Falha ao confirmar status pós-conexão:", err.message);
+            // Não derruba a conexão por uma falha pontual de verificação;
+            // deixa o heartbeat regular assumir a partir daqui.
+        }
+
         setLive(true);
         startHeartbeat();
     });
