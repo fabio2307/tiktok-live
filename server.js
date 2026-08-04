@@ -4,13 +4,14 @@ import { Server } from "socket.io";
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
-const { TikTokLiveConnection, ControlEvent, ControlAction } = require("tiktok-live-connector");
+const { TikTokLiveConnection, ControlEvent } = require("tiktok-live-connector");
 
 require("dotenv").config();
 
 const app = express();
 const server = http.createServer(app);
 
+// ✅ CORS CORRIGIDO
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
     .split(",")
     .map(o => o.trim())
@@ -31,8 +32,7 @@ const io = new Server(server, {
             } else {
                 callback(new Error("Not allowed by CORS"));
             }
-        },
-        methods: ["GET", "POST"]
+        }
     }
 });
 
@@ -45,10 +45,11 @@ if (!username) {
 const PORT = process.env.PORT || 3000;
 
 // CONFIG
-const HEARTBEAT_INTERVAL = 60000;
+const HEARTBEAT_INTERVAL = 30000;
 const ACTIVITY_WINDOW = 180000;
 const INITIAL_GRACE = 120000;
 
+// ESTADO
 let isLive = false;
 let connection = null;
 let heartbeatTimer = null;
@@ -59,6 +60,7 @@ let lastActivity = 0;
 // STATUS
 function setLive(status) {
     if (status === isLive) return;
+
     isLive = status;
 
     console.log(`[STATUS] ${username} → ${status ? "🟢 LIVE" : "🔴 OFFLINE"}`);
@@ -81,7 +83,7 @@ function cleanupConnection() {
     }
 }
 
-// HEARTBEAT MELHORADO
+// HEARTBEAT ESTÁVEL
 function startHeartbeat() {
     clearInterval(heartbeatTimer);
 
@@ -93,11 +95,11 @@ function startHeartbeat() {
         const timeSinceConnect = now - (connectedAt || now);
 
         const hasRecentActivity =
-            lastActivity > 0 && timeSinceActivity < 180000;
+            lastActivity > 0 && timeSinceActivity < ACTIVITY_WINDOW;
 
         const stillLive =
             hasRecentActivity ||
-            timeSinceConnect < 180000;
+            timeSinceConnect < INITIAL_GRACE;
 
         console.log({
             activity: lastActivity ? Math.floor(timeSinceActivity / 1000) + "s" : "nunca",
@@ -109,13 +111,13 @@ function startHeartbeat() {
             return;
         }
 
-        console.log("💀 Sem sinais de vida → OFFLINE");
+        console.log("💀 Sem sinais → reconectando");
 
         setLive(false);
         cleanupConnection();
-        connectToLive();
+        setTimeout(connectToLive, 10000); // 🔥 delay pra evitar loop
 
-    }, 30000); // 🔥 mais rápido (30s)
+    }, HEARTBEAT_INTERVAL);
 }
 
 // CONEXÃO
@@ -123,7 +125,6 @@ function connectToLive() {
     if (isConnecting || connection) return;
 
     isConnecting = true;
-
     cleanupConnection();
 
     connection = new TikTokLiveConnection(username, {
@@ -146,15 +147,13 @@ function connectToLive() {
 
         console.log(`✅ Conectado sala ${state.roomId}`);
 
-        // ⚠️ NÃO derruba conexão aqui mais!
         try {
             const roomInfo = await connection.fetchRoomInfo();
-            console.log("INIT STATUS:", roomInfo?.status);
 
             if (roomInfo?.status === 2) {
                 setLive(true);
             } else {
-                console.log("⚠️ Status inconclusivo, aguardando heartbeat");
+                console.log("⚠️ Aguardando atividade...");
             }
         } catch { }
 
@@ -171,18 +170,13 @@ function connectToLive() {
         setTimeout(connectToLive, 30000);
     });
 
-    connection.on(ControlEvent.STREAM_END, () => {
-        console.log("🔴 Live encerrada");
-        setLive(false);
-    });
-
     connection.on("error", (err) => {
         console.error("Erro:", err.message);
     });
 
     connection.connect().catch(err => {
         isConnecting = false;
-        console.log("❌ Erro ao conectar:", err.message);
+        console.log("❌ Erro:", err.message);
         setTimeout(connectToLive, 30000);
     });
 }
@@ -205,9 +199,17 @@ app.get("/health", (req, res) => {
 
 app.use(express.static("public"));
 
-// START
+// START (APENAS UMA VEZ)
 server.listen(PORT, () => {
     console.log(`🚀 http://localhost:${PORT}`);
     console.log(`Monitorando @${username}`);
     connectToLive();
 });
+
+// 🔥 Anti-hibernação leve (Render safe)
+setInterval(() => {
+    if (!connection && !isConnecting) {
+        console.log("♻️ Reconectando (keep alive)");
+        connectToLive();
+    }
+}, 60000);
