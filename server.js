@@ -1,17 +1,13 @@
+import "dotenv/config";
 import express from "express";
 import http from "http";
 import { Server } from "socket.io";
-import { createRequire } from "module";
-
-const require = createRequire(import.meta.url);
-const { TikTokLiveConnection, ControlEvent } = require("tiktok-live-connector");
-
-require("dotenv").config();
+import { TikTokLiveConnection, SignConfig } from "tiktok-live-connector";
 
 const app = express();
 const server = http.createServer(app);
 
-// ✅ CORS CORRIGIDO
+// CORS
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "*")
     .split(",")
     .map(o => o.trim())
@@ -36,180 +32,101 @@ const io = new Server(server, {
     }
 });
 
-const username = process.env.TIKTOK_USER;
+const username = (process.env.TIKTOK_USER || "").trim().replace(/^@/, "");
 if (!username) {
     console.error("❌ TIKTOK_USER não configurado.");
     process.exit(1);
 }
 
+// Opcional: chave da Euler Stream (evita limite do fallback). https://www.eulerstream.com
+if (process.env.SIGN_API_KEY) SignConfig.apiKey = process.env.SIGN_API_KEY;
+
 const PORT = process.env.PORT || 3000;
 
 // CONFIG
-const HEARTBEAT_INTERVAL = 30000;
-const ACTIVITY_WINDOW = 180000;
-const INITIAL_GRACE = 120000;
+const CHECK_INTERVAL = Number(process.env.CHECK_INTERVAL_MS) || 30000; // intervalo entre verificações
+const OFFLINE_CONFIRMATIONS = 2; // quantas checagens "offline" seguidas antes de marcar offline (evita piscar)
 
 // ESTADO
 let isLive = false;
-let connection = null;
-let heartbeatTimer = null;
-let isConnecting = false;
-let connectedAt = null;
-let lastActivity = 0;
+let lastCheck = null;
+let lastError = null;
+let offlineStreak = 0;
+let checking = false;
 
-// STATUS
-function setLive(status) {
-    if (status === isLive) return;
+// Uma única instância, usada só para as consultas HTTP (não abre WebSocket)
+const client = new TikTokLiveConnection(username, {
+    webClientOptions: { timeout: { request: 10000 } }
+});
+client.on("error", ({ info, exception }) => {
+    console.error("Erro (lib):", info, exception?.message || exception);
+});
 
-    isLive = status;
-
-    console.log(`[STATUS] ${username} → ${status ? "🟢 LIVE" : "🔴 OFFLINE"}`);
-
-    io.emit("liveStatus", {
+function payload() {
+    return {
         user: username,
         online: isLive,
-        lastCheck: new Date().toISOString()
-    });
+        lastCheck: lastCheck ? lastCheck.toISOString() : null,
+        error: lastError
+    };
 }
 
-// LIMPEZA
-function cleanupConnection() {
-    clearInterval(heartbeatTimer);
-
-    if (connection) {
-        connection.removeAllListeners();
-        try { connection.disconnect(); } catch { }
-        connection = null;
-    }
+function setLive(status) {
+    if (status === isLive) return;
+    isLive = status;
+    console.log(`[STATUS] @${username} → ${status ? "🟢 LIVE" : "🔴 OFFLINE"}`);
 }
 
-// HEARTBEAT ESTÁVEL
-function startHeartbeat() {
-    clearInterval(heartbeatTimer);
+// VERIFICAÇÃO
+async function checkLive() {
+    if (checking) return;
+    checking = true;
 
-    heartbeatTimer = setInterval(() => {
-        if (!connection) return;
+    try {
+        const live = await client.fetchIsLive();
+        lastError = null;
 
-        const now = Date.now();
-        const timeSinceActivity = now - lastActivity;
-        const timeSinceConnect = now - (connectedAt || now);
-
-        const hasRecentActivity =
-            lastActivity > 0 && timeSinceActivity < ACTIVITY_WINDOW;
-
-        const stillLive =
-            hasRecentActivity ||
-            timeSinceConnect < INITIAL_GRACE;
-
-        console.log({
-            activity: lastActivity ? Math.floor(timeSinceActivity / 1000) + "s" : "nunca",
-            connected: Math.floor(timeSinceConnect / 1000) + "s"
-        });
-
-        if (stillLive) {
+        if (live) {
+            offlineStreak = 0;
             setLive(true);
-            return;
+        } else {
+            offlineStreak++;
+            if (offlineStreak >= OFFLINE_CONFIRMATIONS || !isLive) setLive(false);
         }
 
-        console.log("💀 Sem sinais → reconectando");
-
-        setLive(false);
-        cleanupConnection();
-        setTimeout(connectToLive, 10000); // 🔥 delay pra evitar loop
-
-    }, HEARTBEAT_INTERVAL);
-}
-
-// CONEXÃO
-function connectToLive() {
-    if (isConnecting || connection) return;
-
-    isConnecting = true;
-    cleanupConnection();
-
-    connection = new TikTokLiveConnection(username, {
-        requestOptions: { timeout: 8000 },
-        processInitialData: false
-    });
-
-    const markActivity = () => {
-        lastActivity = Date.now();
-    };
-
-    connection.on("chat", markActivity);
-    connection.on("like", markActivity);
-    connection.on("gift", markActivity);
-    connection.on("member", markActivity);
-
-    connection.once(ControlEvent.CONNECTED, async (state) => {
-        isConnecting = false;
-        connectedAt = Date.now();
-
-        console.log(`✅ Conectado sala ${state.roomId}`);
-
-        try {
-            const roomInfo = await connection.fetchRoomInfo();
-
-            if (roomInfo?.status === 2) {
-                setLive(true);
-            } else {
-                console.log("⚠️ Aguardando atividade...");
-            }
-        } catch { }
-
-        startHeartbeat();
-    });
-
-    connection.once(ControlEvent.DISCONNECTED, () => {
-        console.log("🔌 Desconectado");
-
-        isConnecting = false;
-        setLive(false);
-
-        cleanupConnection();
-        setTimeout(connectToLive, 30000);
-    });
-
-    connection.on("error", (err) => {
-        console.error("Erro:", err.message);
-    });
-
-    connection.connect().catch(err => {
-        isConnecting = false;
-        console.log("❌ Erro:", err.message);
-        setTimeout(connectToLive, 30000);
-    });
+        console.log(`[CHECK] @${username}: ${live ? "online" : "offline"}`);
+    } catch (err) {
+        // Falha na consulta NÃO muda o status (evita falso offline por erro de rede/bloqueio)
+        lastError = err?.message || String(err);
+        const causes = err?.requestErrs?.map(e => e?.message).filter(Boolean);
+        console.error("❌ Falha ao verificar live:", lastError, causes?.length ? causes : "");
+    } finally {
+        lastCheck = new Date();
+        checking = false;
+        io.emit("liveStatus", payload());
+    }
 }
 
 // SOCKET
 io.on("connection", (socket) => {
-    socket.emit("liveStatus", {
-        user: username,
-        online: isLive
-    });
+    socket.emit("liveStatus", payload());
 });
 
 // API
 app.get("/health", (req, res) => {
-    res.json({
-        live: isLive,
-        connected: !!connection
-    });
+    res.json({ live: isLive, lastCheck, error: lastError });
+});
+
+app.get("/status", (req, res) => {
+    res.json(payload());
 });
 
 app.use(express.static("public"));
 
-// START (APENAS UMA VEZ)
+// START
 server.listen(PORT, () => {
     console.log(`🚀 http://localhost:${PORT}`);
-    console.log(`Monitorando @${username}`);
-    connectToLive();
+    console.log(`Monitorando @${username} a cada ${CHECK_INTERVAL / 1000}s`);
+    checkLive();
+    setInterval(checkLive, CHECK_INTERVAL);
 });
-
-// 🔥 Anti-hibernação leve (Render safe)
-setInterval(() => {
-    if (!connection && !isConnecting) {
-        console.log("♻️ Reconectando (keep alive)");
-        connectToLive();
-    }
-}, 60000);

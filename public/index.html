@@ -57,6 +57,8 @@
                 const time = new Date(data.lastCheck).toLocaleTimeString("pt-BR");
                 lastCheckEl.innerText = `Última verificação: ${time}`;
             }
+
+            connEl.innerText = data.error ? `⚠️ Falha na última verificação: ${data.error}` : "";
         });
 
         socket.on("connect", () => {
